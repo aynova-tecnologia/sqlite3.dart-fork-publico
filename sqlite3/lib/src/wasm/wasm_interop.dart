@@ -52,8 +52,33 @@ class WasmBindings {
     return ptr;
   }
 
+  /// Strings maiores que isto (em unidades UTF-16) vão pelo `TextEncoder`.
+  /// Abaixo disso o caminho antigo já é barato e não vale reservar 3x.
+  static const _minimoEncodeInto = 256;
+
+  static final TextEncoder _encoder = TextEncoder();
+
   Pointer allocateZeroTerminated(String string) {
-    return allocateBytes(utf8.encode(string), additionalLength: 1);
+    if (string.length < _minimoEncodeInto) {
+      return allocateBytes(utf8.encode(string), additionalLength: 1);
+    }
+    // aynova: o caminho acima codifica o UTF-8 no Dart e copia byte a byte
+    // para a memória do wasm (`setRange` de uma lista Dart para uma view JS),
+    // o que no dart2wasm vira uma chamada por byte. No app web a sync passa
+    // dezenas de MB de SQL por aqui. `TextEncoder.encodeInto` escreve o UTF-8
+    // direto na memória do sqlite numa chamada nativa. Mesmos bytes: os dois
+    // trocam surrogate sem par por U+FFFD.
+    //
+    // UTF-8 usa no máximo 3 bytes por unidade UTF-16, +1 para o terminador.
+    final capacidade = string.length * 3;
+    final ptr = malloc(capacidade + 1);
+    // A view é criada depois do malloc: ele pode crescer a memória e soltar o
+    // buffer antigo.
+    // View da própria memória do wasm (lado JS): `toJS` não copia.
+    final destino = memory.dartBuffer.asUint8List(ptr, capacidade).toJS;
+    final escritos = _encoder.encodeInto(string, destino).written;
+    memory.asBytes[ptr + escritos] = 0;
+    return ptr;
   }
 
   // TODO: We don't set a maximum memory size when compiling the module, so it
